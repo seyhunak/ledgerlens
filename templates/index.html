@@ -1,0 +1,110 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>LedgerLens — Financial Document Intelligence</title>
+<link rel="stylesheet" href="/static/style.css">
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@500;700&family=Inter:wght@400;500;600&family=IBM+Plex+Mono:wght@400;500&display=swap">
+</head>
+<body>
+<header class="topbar">
+  <div class="brand">LedgerLens <span>·</span> Financial Document Intelligence</div>
+  <div class="meta">Muse Spark 1.3 Free via opencode · OCR: pypdf + tesseract · {{ metric_count }} ops · avg {{ avg_ms }} ms</div>
+</header>
+<main class="wrap">
+  <h1>Every figure traceable to its source passage.</h1>
+  <p class="lede">Upload invoices and policy documents. The system extracts typed fields, runs deterministic business rules, answers questions with citations, refuses when evidence is insufficient, and routes exceptions to human review. No figure is presented without its evidence.</p>
+
+  <div class="grid">
+    <section class="card">
+      <h2>01 — Ingest</h2>
+      <h3>Upload a document</h3>
+      <form id="ingest" enctype="multipart/form-data">
+        <div class="row">
+          <input type="file" name="file" accept=".pdf,.png,.jpg,.jpeg,.tiff,.txt" required>
+        </div>
+        <div class="row" style="margin-top:8px">
+          <button type="submit">Extract and validate</button>
+          <span class="meta">Key: demo-key-123 · reviewer: reviewer-key-456</span>
+        </div>
+      </form>
+      <div id="ingestOut" class="log" style="margin-top:10px"></div>
+    </section>
+
+    <section class="card">
+      <h2>02 — Ask</h2>
+      <h3>Grounded answers only</h3>
+      <form id="ask">
+        <input type="text" name="q" placeholder="e.g. What is the grand total of invoice INV-2026-0481?" required>
+        <div class="row" style="margin-top:8px"><button type="submit">Ask with citations</button></div>
+      </form>
+      <div id="askOut" style="margin-top:10px"></div>
+    </section>
+  </div>
+
+  <div class="grid">
+    <section class="card">
+      <h2>03 — Documents</h2>
+      <table>
+        <tr><th>File</th><th>Type</th><th>Chars</th><th>Review</th></tr>
+        {% for d in docs %}
+        <tr><td>{{ d.filename }}</td><td>{{ d.doc_type }}</td><td>{{ d.chars }}</td>
+        <td>{% if d.needs_review %}<span class="pill bad">needs review</span>{% else %}<span class="pill good">clean</span>{% endif %}</td></tr>
+        {% endfor %}
+      </table>
+    </section>
+    <section class="card">
+      <h2>04 — Human review queue</h2>
+      <table>
+        <tr><th>Doc</th><th>Reason</th><th>Action</th></tr>
+        {% for r in reviews %}
+        <tr><td>{{ r.filename }}<br><span class="meta">{{ r.doc_id }}</span></td>
+        <td>{{ r.reasons | join('; ') }}</td>
+        <td><button class="secondary" onclick="resolve('{{ r.doc_id }}','approved')">Approve</button>
+            <button class="secondary" onclick="resolve('{{ r.doc_id }}','rejected')">Reject</button></td></tr>
+        {% endfor %}
+      </table>
+      {% if not reviews %}<p class="meta">Queue empty. Exceptions from failed business rules land here.</p>{% endif %}
+    </section>
+  </div>
+
+  <div class="card" style="margin-top:16px">
+    <h2>05 — Operations</h2>
+    <div class="row">
+      <button class="secondary" onclick="fetch('/api/metrics',{headers:{'X-API-Key':KEY}}).then(r=>r.json()).then(j=>document.getElementById('m').textContent=JSON.stringify(j.summary,null,2))">Show latency and cost</button>
+      <button class="secondary" onclick="location.reload()">Refresh</button>
+    </div>
+    <pre id="m" class="log"></pre>
+  </div>
+
+  <footer class="foot">LedgerLens 1.0 · Managed API versus self-hosted comparison and benchmark notes live in DEPLOYMENT.md · Evaluation set: tests/testset.v1.json</footer>
+</main>
+<script>
+const KEY = 'demo-key-123';
+document.getElementById('ingest').onsubmit = async e => {
+  e.preventDefault();
+  const fd = new FormData(e.target);
+  const r = await fetch('/api/ingest', {method:'POST', headers:{'X-API-Key':KEY}, body:fd});
+  document.getElementById('ingestOut').textContent = JSON.stringify(await r.json(), null, 2);
+};
+document.getElementById('ask').onsubmit = async e => {
+  e.preventDefault();
+  const q = e.target.q.value;
+  const fd = new FormData(); fd.append('question', q);
+  const r = await fetch('/api/ask', {method:'POST', headers:{'X-API-Key':KEY}, body:fd});
+  const j = await r.json();
+  let h = '<p><strong>' + (j.refused ? 'Refused (insufficient evidence).' : j.answer) + '</strong></p>';
+  (j.citations||[]).forEach((c,i)=>{ h += '<div class="cite">['+i+'] '+c.doc_id+' · score '+c.score.toFixed(2)+'<br>'+c.passage+'</div>'; });
+  h += '<p class="meta">model: '+j.model+' · '+j.latency_ms+' ms · grounded: '+j.grounded+'</p>';
+  document.getElementById('askOut').innerHTML = h;
+};
+async function resolve(id, decision){
+  const fd = new FormData(); fd.append('decision', decision); fd.append('reviewer','demo-reviewer');
+  const r = await fetch('/api/reviews/'+id+'/resolve', {method:'POST', headers:{'X-API-Key':'reviewer-key-456','X-Role':'reviewer'}, body:fd});
+  alert(JSON.stringify(await r.json()));
+  location.reload();
+}
+</script>
+</body>
+</html>
