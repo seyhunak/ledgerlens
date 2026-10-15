@@ -5,6 +5,8 @@
 [![Eval v1: 12/12](https://img.shields.io/badge/eval%20v1-12%2F12-brightgreen)](tests/testset.v1.json)
 [![OCR: pypdf + tesseract](https://img.shields.io/badge/OCR-pypdf%20%2B%20tesseract-lightgrey)](app/ocr.py)
 [![Model: Muse Spark 1.3 Free](https://img.shields.io/badge/model-Muse%20Spark%201.3%20Free-violet)](app/llm.py)
+[![Docker](https://img.shields.io/badge/docker-ready-blue)](Dockerfile)
+[![Azure: Container Apps + Bicep](https://img.shields.io/badge/azure-container%20apps%20%2B%20bicep-0078D4)](infra/azure/main.bicep)
 
 Invoices and finance policy documents in; structured data, cited answers, and human-review routing out.
 One shaped model call per question, deterministic everything else, refusal when evidence is insufficient.
@@ -52,6 +54,39 @@ flowchart LR
 pip install -r requirements.txt
 uvicorn app.main:app --port 8000   # UI at http://localhost:8000
 ```
+
+### Docker
+
+```
+docker build -t ledgerlens:1.1.0 .
+docker run -p 8000:8000 -e FIN_API_KEY=<secret> -e FIN_REVIEWER_KEY=<secret> ledgerlens:1.1.0
+# or: docker compose up --build
+```
+
+Non-root user, pinned dependencies, `/health` + `/ready` probes, data on a volume.
+
+### Azure
+
+`infra/azure/main.bicep` deploys Container Apps (1–5 replicas, HTTP autoscale)
+with secrets in Key Vault (managed identity, RBAC), Log Analytics, and
+liveness/readiness probes:
+
+```
+az group create -n ledgerlens-rg -l westeurope
+az deployment group create -g ledgerlens-rg --template-file infra/azure/main.bicep \
+  --parameters image=<registry>/ledgerlens:1.1.0 apiKey=<secret> reviewerKey=<secret>
+```
+
+## Security
+
+| Control | Implementation |
+|---|---|
+| Auth | `X-API-Key` header, constant-time compare, rotating keys via `FIN_API_KEYS` / `FIN_REVIEWER_KEYS`; reviewer role required for review resolution |
+| Transport | TLS enforced at ingress (`allowInsecure: false` in Bicep); security headers (nosniff, DENY framing, no-referrer, CSP) |
+| Abuse | 60 req/min per client (`RATE_LIMIT_PER_MIN`), 15 MB upload cap (`MAX_UPLOAD_BYTES`), filename sanitisation, restricted extensions |
+| Secrets | Env-only, never logged; on Azure served from Key Vault via managed identity |
+| Audit | Append-only `audit.jsonl` for ingests, review decisions, auth denials (contents and keys excluded) |
+| Probes | `/health` (liveness) and `/ready` (store + upload writability) for orchestrators |
 
 Demo keys: `X-API-Key: demo-key-123` (analyst). Reviewer actions need
 `X-API-Key: reviewer-key-456` + `X-Role: reviewer`.

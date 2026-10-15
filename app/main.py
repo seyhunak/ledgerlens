@@ -1,8 +1,11 @@
 """FastAPI: ingestion, extraction, grounded QA, human review, metrics, eval."""
 from __future__ import annotations
+import os
+import re
 import time, uuid
 from pathlib import Path
 from fastapi import Depends, FastAPI, File, Form, Header, HTTPException, Request, UploadFile
+from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import HTMLResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
@@ -15,18 +18,59 @@ from app.llm import grounded_answer
 from app.ocr import extract_text
 from app.rules import run_rules
 from app.schemas import IngestResponse, RuleFinding
+from app.security import (RequestIDMiddleware, SecurityHeadersMiddleware,
+                          RateLimitMiddleware, audit)
 
 ROOT = Path(__file__).resolve().parent.parent
 UPLOADS = ROOT / "data" / "uploads"
 UPLOADS.mkdir(parents=True, exist_ok=True)
 
-app = FastAPI(title="Enterprise Financial Document Intelligence", version="1.0.0")
+MAX_UPLOAD_BYTES = int(os.getenv("MAX_UPLOAD_BYTES", str(15 * 1024 * 1024)))
+ALLOWED_EXTS = (".pdf", ".png", ".jpg", ".jpeg", ".tiff", ".txt")
+
+app = FastAPI(title="Enterprise Financial Document Intelligence", version="1.1.0",
+              docs_url="/api/docs", redoc_url=None)
+app.add_middleware(RequestIDMiddleware)
+app.add_middleware(SecurityHeadersMiddleware)
+app.add_middleware(RateLimitMiddleware)
+_cors = [o.strip() for o in os.getenv("CORS_ORIGINS", "").split(",") if o.strip()]
+if _cors:
+    app.add_middleware(CORSMiddleware, allow_origins=_cors, allow_methods=["GET", "POST"],
+                       allow_headers=["X-API-Key", "X-Role", "X-Request-ID"])
 app.mount("/static", StaticFiles(directory=str(ROOT / "static")), name="static")
 templates = Jinja2Templates(directory=str(ROOT / "templates"))
 
 # In-memory corpus (rebuilt from store on demand is overkill for demo)
 CORPUS: list[dict] = []
 DOC_TEXTS: dict[str, str] = {}
+
+
+@app.get("/health")
+def health():
+    return {"status": "ok", "version": app.version}
+
+
+@app.get("/ready")
+def ready():
+    checks = {"store_writable": False, "uploads_writable": False}
+    try:
+        probe = store.STORE / ".probe"
+        probe.write_text("ok"); probe.unlink(missing_ok=True)
+        checks["store_writable"] = True
+    except Exception:
+        pass
+    checks["uploads_writable"] = UPLOADS.is_dir()
+    if not all(checks.values()):
+        return JSONResponse({"ready": False, "checks": checks}, status_code=503)
+    return {"ready": True, "checks": checks}
+
+
+def _safe_filename(name: str) -> str:
+    base = Path(name).name  # strip directories
+    clean = re.sub(r"[^A-Za-z0-9._-]", "_", base)[:120]
+    if "." not in clean:
+        clean += ".bin"
+    return clean
 
 
 @app.get("/", response_class=HTMLResponse)
@@ -48,11 +92,15 @@ async def ingest(file: UploadFile = File(...),
                  role: str = Depends(check_access),
                  x_api_key: str | None = Header(default=None)):
     t0 = time.time()
-    if not file.filename or not file.filename.lower().endswith((".pdf", ".png", ".jpg", ".jpeg", ".tiff", ".txt")):
+    fname = _safe_filename(file.filename or "")
+    if not fname.lower().endswith(ALLOWED_EXTS):
         raise HTTPException(400, "Only PDF / image / TXT accepted")
+    raw = await file.read()
+    if len(raw) > MAX_UPLOAD_BYTES:
+        raise HTTPException(413, f"File too large (max {MAX_UPLOAD_BYTES} bytes)")
     doc_id = uuid.uuid4().hex[:10]
-    dest = UPLOADS / f"{doc_id}_{file.filename}"
-    dest.write_bytes(await file.read())
+    dest = UPLOADS / f"{doc_id}_{fname}"
+    dest.write_bytes(raw)
     try:
         text, pages, ocr_used = extract_text(str(dest), file.filename)
     except Exception as e:
@@ -72,18 +120,19 @@ async def ingest(file: UploadFile = File(...),
         payload = ext.model_dump()
     needs_review = any(not r.passed for r in rules)
     ms = int((time.time() - t0) * 1000)
-    store.save_doc({"doc_id": doc_id, "filename": file.filename, "doc_type": dtype,
+    store.save_doc({"doc_id": doc_id, "filename": fname, "doc_type": dtype,
                     "pages": pages, "chars": len(text), "ocr_used": ocr_used,
                     "needs_review": needs_review, "role": role})
+    audit("doc.ingested", doc_id=doc_id, doc_type=dtype, needs_review=needs_review, role=role)
     if needs_review:
-        store.queue_review({"doc_id": doc_id, "filename": file.filename,
+        store.queue_review({"doc_id": doc_id, "filename": fname,
                             "reasons": [r.detail for r in rules if not r.passed],
                             "status": "open"})
     DOC_TEXTS[doc_id] = text
     CORPUS.extend(chunk(text, doc_id))
     store.log_metric({"op": "ingest", "doc_id": doc_id, "latency_ms": ms,
                       "ocr_used": ocr_used, "role": role, "est_cost_usd": 0.002 if ocr_used else 0.0005})
-    return IngestResponse(doc_id=doc_id, filename=file.filename, doc_type=dtype, pages=pages,
+    return IngestResponse(doc_id=doc_id, filename=fname, doc_type=dtype, pages=pages,
                           chars=len(text), ocr_used=ocr_used, extraction=payload,
                           rules=rules, needs_review=needs_review, latency_ms=ms)
 
@@ -114,6 +163,7 @@ def resolve(doc_id: str, decision: str = Form(...), reviewer: str = Form(default
     ok = store.resolve_review(doc_id, decision, reviewer)
     store.log_metric({"op": "review_resolve", "doc_id": doc_id, "decision": decision,
                       "latency_ms": 0, "est_cost_usd": 0})
+    audit("review.resolved", doc_id=doc_id, decision=decision, reviewer=reviewer)
     if not ok:
         raise HTTPException(404, "No open review for that doc")
     return {"doc_id": doc_id, "decision": decision}

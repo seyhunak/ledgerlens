@@ -1,0 +1,22 @@
+services:
+  ledgerlens:
+    build: .
+    image: ledgerlens:1.1.0
+    ports:
+      - "8000:8000"
+    environment:
+      FIN_API_KEY: ${FIN_API_KEY:-demo-key-123}
+      FIN_REVIEWER_KEY: ${FIN_REVIEWER_KEY:-reviewer-key-456}
+      RATE_LIMIT_PER_MIN: ${RATE_LIMIT_PER_MIN:-60}
+      MAX_UPLOAD_BYTES: ${MAX_UPLOAD_BYTES:-15728640}
+    volumes:
+      - ledger-data:/srv/app/data
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://localhost:8000/health"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+
+volumes:
+  ledger-data:

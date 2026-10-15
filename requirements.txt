@@ -1,10 +1,11 @@
-fastapi
-uvicorn[standard]
-pydantic
-python-multipart
-jinja2
-pypdf
-Pillow
-pytesseract
-scikit-learn
-pytest
+# Pinned for reproducible enterprise builds. Regenerate with `pip freeze`.
+fastapi==0.143.2
+uvicorn[standard]==0.54.0
+pydantic==2.14.1
+python-multipart==0.0.32
+jinja2==3.1.6
+pypdf==6.20.1
+Pillow==12.3.0
+pytesseract==0.3.13
+scikit-learn==1.9.1
+pytest==9.1.1
