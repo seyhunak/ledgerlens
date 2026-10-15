@@ -42,7 +42,7 @@ flowchart LR
 | Extraction | `app/extract.py`, `app/schemas.py` | Regex extraction into Pydantic schemas + required-field checks |
 | Rules | `app/rules.py` | Deterministic totals / tax / threshold / PO validation |
 | Retrieval | `app/index.py` | Chunking + TF-IDF cosine retrieval with scored citations |
-| Model call | `app/llm.py` | Single grounded call: live **Muse Spark 1.3 Free** if `SPARK_API_KEY` is set, else reproducible extractive fallback |
+| Model call | `app/llm.py` | Single grounded call via the **local opencode service** (`opencode/muse-spark-1.3-contributor-free`); extractive fallback if unreachable. No API keys, no cloud endpoints. |
 | Ops | `app/store.py`, `app/auth.py` | JSONL logs, latency/cost metrics, API-key + reviewer-role auth |
 | Eval | `app/eval.py`, `tests/testset.v1.json` | Versioned test set (extraction, rules, groundedness, refusal, auth) |
 
@@ -55,8 +55,10 @@ uvicorn app.main:app --port 8000   # UI at http://localhost:8000
 
 Demo keys: `X-API-Key: demo-key-123` (analyst). Reviewer actions need
 `X-API-Key: reviewer-key-456` + `X-Role: reviewer`.
-Set `SPARK_API_KEY` to route the single grounded-answer call to the live model;
-without it the offline extractive fallback is used (fully reproducible).
+The single grounded-answer call goes through the local opencode background service
+(`opencode run --model opencode/muse-spark-1.3-contributor-free`); no API keys are
+used or accepted. If the service is unreachable, the offline extractive fallback
+answers from retrieved passages (fully reproducible).
 
 ## Testing
 

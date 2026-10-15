@@ -1,49 +1,60 @@
-"""Single model-call abstraction (Muse Spark 1.3 Free via opencode, with safe fallback).
+"""Single model-call abstraction: Muse Spark via the LOCAL opencode service only.
 
 The app makes exactly ONE shaped model call per question: grounded_answer().
-- If SPARK_API_KEY (or ANTHROPIC_API_KEY) is set, it calls the chat API with
-  retrieved passages as the ONLY allowed evidence and JSON tool-style output.
-- Otherwise it uses a deterministic extractive fallback (no hallucination),
-  which keeps the demo, tests and eval fully reproducible offline.
+- The remote path shells to the local opencode background service
+  (`opencode run --model opencode/muse-spark-1.3-contributor-free --format json`).
+  No API keys, no cloud endpoints: opencode's own login handles auth.
+- Retrieved passages are the ONLY allowed evidence; the model must reply as
+  JSON {"answer": str, "used_passages": [int]} or {"answer": "REFUSE", ...}.
+- If the service is unreachable or returns unparsable output, a deterministic
+  extractive fallback answers from the top-ranked passages (no hallucination),
+  keeping the demo, tests and eval reproducible offline.
 """
 from __future__ import annotations
 import json
 import os
+import subprocess
 import time
-import urllib.request
+from pathlib import Path
 from app.index import MIN_SCORE
 from app.schemas import Citation, QAResponse
 
-MODEL_ID = "muse-spark-1.3-free"
+MODEL_ID = os.getenv("OPENCODE_MODEL", "opencode/muse-spark-1.3-contributor-free")
+OPENCODE_BIN = os.getenv("OPENCODE_BIN", "opencode")
+TIMEOUT_S = int(os.getenv("OPENCODE_TIMEOUT_S", "120"))
+PROJECT_ROOT = Path(__file__).resolve().parent.parent
+
 SYSTEM = (
     "You answer finance questions using ONLY the provided passages. "
-    "Reply as JSON {\"answer\": str, \"used_passages\": [int]}. "
-    "If the passages do not contain the answer, reply {\"answer\": \"REFUSE\", \"used_passages\": []}."
+    "Reply with exactly one JSON object and nothing else: "
+    '{"answer": str, "used_passages": [int]}. '
+    "If the passages do not contain the answer, reply "
+    '{"answer": "REFUSE", "used_passages": []}.'
 )
 
 
 def _remote_call(question: str, citations: list[Citation]) -> str | None:
-    key = os.getenv("SPARK_API_KEY") or os.getenv("ANTHROPIC_API_KEY")
-    base = os.getenv("SPARK_API_BASE", "https://api.anthropic.com/v1/messages")
-    if not key:
-        return None
     passages = [f"[{i}] {c.passage}" for i, c in enumerate(citations)]
-    body = json.dumps({
-        "model": os.getenv("SPARK_MODEL", MODEL_ID),
-        "max_tokens": 400,
-        "system": SYSTEM,
-        "messages": [{"role": "user",
-                      "content": f"Passages:\n" + "\n".join(passages) + f"\n\nQuestion: {question}"}],
-    }).encode()
+    prompt = SYSTEM + "\n\nPassages:\n" + "\n".join(passages) + f"\n\nQuestion: {question}"
     try:
-        req = urllib.request.Request(base, data=body, headers={
-            "Content-Type": "application/json",
-            "x-api-key": key, "anthropic-version": "2023-06-01"})
-        with urllib.request.urlopen(req, timeout=30) as r:
-            resp = json.loads(r.read().decode())
-        return resp["content"][0]["text"]
-    except Exception:
+        proc = subprocess.run(
+            [OPENCODE_BIN, "run", "--model", MODEL_ID, "--format", "json", prompt],
+            cwd=str(PROJECT_ROOT), capture_output=True, text=True, timeout=TIMEOUT_S,
+        )
+    except (FileNotFoundError, subprocess.TimeoutExpired):
         return None
+    if proc.returncode != 0:
+        return None
+    texts: list[str] = []
+    for line in proc.stdout.splitlines():
+        try:
+            evt = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        part = evt.get("part", {}) if isinstance(evt, dict) else {}
+        if evt.get("type") == "text" and part.get("type") == "text":
+            texts.append(part.get("text", ""))
+    return "".join(texts).strip() or None
 
 
 def grounded_answer(question: str, citations: list[Citation]) -> QAResponse:
